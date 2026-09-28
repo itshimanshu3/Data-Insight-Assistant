@@ -1,349 +1,166 @@
-# 📊 GenAI Data Insight Assistant
+# GenAI Data Insight Assistant
 
-> Ask questions about your database in plain English. Get back the SQL, a results table, a chart, and a plain-English summary, with no SQL knowledge required.
+A data assistant that lets you query a database in plain English instead of SQL. You can type something like:
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![Streamlit](https://img.shields.io/badge/UI-Streamlit-red)
-![LLM](https://img.shields.io/badge/LLM-Groq-orange)
-![VectorDB](https://img.shields.io/badge/Vector%20DB-ChromaDB-green)
-![Database](https://img.shields.io/badge/Database-Supabase%20(PostgreSQL)-3ECF8E)
-![CI](https://img.shields.io/badge/CI-GitHub%20Actions-black)
+"Show me the 5 most expensive brands by average price, but only brands with at least 20 products."
 
-**🔗 Live Demo:** `<add your Streamlit Cloud URL here>`
+...and get back the SQL that was generated, a results table, a chart, and a short plain-English summary of what the numbers say, not just a raw table.
 
----
+I built this as a RAG (Retrieval-Augmented Generation) pipeline with five stages: the system first retrieves only the parts of the database schema that matter for your question, has an LLM write the SQL from that context, validates the query before it can run, executes it on a read-only connection (with one automatic retry if it fails), and finally explains the result. A cache sits in front of all of it so repeated questions cost nothing.
 
-## 📖 Table of Contents
+## How it works
 
-- [Overview](#-overview)
-- [Key Features](#-key-features)
-- [How It Works](#-how-it-works)
-- [Tech Stack](#-tech-stack)
-- [Project Structure](#-project-structure)
-- [Getting Started](#-getting-started)
-- [Usage](#-usage)
-- [Testing & Evaluation](#-testing--evaluation)
-- [Security Design](#-security-design)
-- [Deployment](#-deployment)
-- [Free-Tier Notes & Troubleshooting](#-free-tier-notes--troubleshooting)
-- [Known Limitations](#-known-limitations)
-- [Roadmap](#-roadmap)
-- [Author](#-author)
-
----
-
-## 🎯 Overview
-
-Business users often have simple data questions ("What were our top 5 products by revenue?") but don't know SQL, so they wait on an analyst. This project removes that bottleneck.
-
-A user types a question in plain English. The system:
-
-1. Retrieves only the **relevant tables and examples** from a vector store (RAG), instead of sending the whole schema to the LLM.
-2. Uses an LLM to **generate SQL** grounded in that retrieved context.
-3. **Validates** the SQL for safety before it ever runs.
-4. Executes it on a **read-only** database connection.
-5. Generates a **plain-English insight** and an **auto-selected chart**.
-
-The entire stack runs on **free tiers**: Groq, Supabase, ChromaDB, and Streamlit Community Cloud.
-
----
-
-## ✨ Key Features
-
-| Feature | Description |
-|---|---|
-| 🗣️ Natural-language to SQL | Converts plain English questions into PostgreSQL `SELECT` queries |
-| 🔍 RAG context retrieval | Retrieves relevant schema and few-shot examples from ChromaDB using local embeddings |
-| 🛡️ SQL safety layer | AST-based validation with `sqlglot` + table allow-list + read-only DB role |
-| 🔁 Self-correction | If a query fails, the DB error is fed back to the LLM for one automatic retry |
-| 💡 Auto-generated insights | A smaller, faster LLM summarizes results in 2-3 plain-English sentences |
-| 📈 Auto-visualization | Rule-based chart selection (line / bar / metric card) using Plotly |
-| 🧠 Conversation memory | Follow-up questions use context from the last few turns |
-| ⚡ Caching | Repeated questions return instantly from a local SQLite cache |
-| 📝 Query logging | Every query logged (SQL, status, latency, tokens, model) for observability |
-
----
-
-## 🧭 How It Works
-
-```mermaid
-flowchart TD
-    A["User question (Streamlit)"] --> B{"Cache hit?"}
-    B -- Yes --> J["Display cached result"]
-    B -- No --> C["RAG retrieval: ChromaDB + local embeddings"]
-    C --> D["SQL generation: Groq gpt-oss-120b"]
-    D --> E["SQL validation: sqlglot + allow-list"]
-    E -- Blocked --> X["Show safe error message"]
-    E -- Valid --> F["Execute on Supabase (read-only role)"]
-    F -- Error --> G["Self-correction: one LLM retry"]
-    G --> E
-    F -- Success --> H["Insight: Groq gpt-oss-20b + chart: Plotly"]
-    H --> I["Cache result + log query"]
-    I --> J
+```
+User question
+│
+▼
+Cache → the normalized question is hashed and checked against a local
+SQLite cache (a hit skips everything below)
+│
+▼
+Retrieve → the question is embedded locally and searched against schema
+descriptions in ChromaDB, returning only the most relevant tables
+│
+▼
+Generate → the LLM writes a PostgreSQL SELECT using only that retrieved
+schema plus the last few turns of conversation
+│
+▼
+Validate → sqlglot parses the SQL into a syntax tree; anything that isn't
+a SELECT on an allow-listed table is rejected before it runs
+│
+▼
+Execute → runs on Supabase through a read-only Postgres role; if it errors,
+the exact database error goes back to the LLM for one corrected retry
+│
+▼
+Explain → a smaller LLM writes a 2-3 sentence summary while a rule-based
+step picks the chart type
+│
+▼
+Streamlit frontend → shows SQL, table, chart, and insight; result is cached
+and the query is logged
 ```
 
-**Why two models?** SQL generation needs strong reasoning, so it uses the larger model (`openai/gpt-oss-120b`). Summarizing a small result table doesn't, so it uses the smaller, faster one (`openai/gpt-oss-20b`). This saves latency and spreads load across separate rate-limit pools.
+I went with separate stages instead of one giant prompt that does everything, mainly because it keeps each stage testable on its own and makes it obvious where things break when they do.
 
-**Why RAG?** Sending an entire schema on every request is expensive and increases hallucinated table/column names. Retrieving only the relevant context keeps prompts small and answers more accurate, and it scales to larger schemas.
+## Stack
 
----
+- **Data:** Supabase (free hosted PostgreSQL) holding a Flipkart products table, plus a `query_logs` table for observability
+- **Embeddings:** sentence-transformers (`all-MiniLM-L6-v2`), small enough to run locally on CPU, so retrieval costs nothing and never touches API rate limits
+- **Vector search:** ChromaDB, persisted locally, storing table and column descriptions
+- **LLM:** Groq's free API. `openai/gpt-oss-120b` writes the SQL and `openai/gpt-oss-20b` writes the summaries (swapped in from Llama 3.3 70B and Llama 3.1 8B after Groq deprecated them, more on that below)
+- **SQL validation:** sqlglot
+- **Cache:** SQLite
+- **Charts:** Plotly, with rule-based chart selection
+- **Frontend:** Streamlit, calling the pipeline modules directly
+- **Tests:** pytest, plus a small evaluation script (more on that below)
 
-## 🛠️ Tech Stack
+## Why RAG and not just sending the whole schema
 
-| Layer | Technology |
-|---|---|
-| Frontend | Streamlit |
-| Orchestration | Python modules / LangChain |
-| LLM Inference | Groq API (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`) |
-| Embeddings | `sentence-transformers` (`all-MiniLM-L6-v2`), runs locally |
-| Vector Store | ChromaDB (persistent, local) |
-| Business Database | Supabase (PostgreSQL) |
-| SQL Validation | `sqlglot` |
-| Data Handling | Pandas, psycopg2 |
-| Visualization | Plotly |
-| Cache | SQLite |
-| Testing | pytest + custom evaluation harness |
-| CI/CD | GitHub Actions |
-| Hosting | Streamlit Community Cloud |
+The obvious approach is to paste the full schema into every prompt. That works for a handful of tables, but it gets expensive fast, since every request pays for tokens it doesn't need, and it gives the model more chances to grab a plausible-sounding but wrong table or column. Retrieving only the relevant tables keeps the prompt small and gives the model less room to wander.
 
----
+To be honest, my sample schema is small enough that this doesn't make a dramatic difference on accuracy today. I built it this way because the pattern is what scales: the same pipeline works on a 200-table schema without changing anything except what's in the vector store.
 
-## 📁 Project Structure
+## Why two models instead of one
+
+Writing correct SQL needs real reasoning, so it gets the larger model. Summarizing a five-row result into two sentences doesn't, so it gets a smaller, faster one. That cuts latency on the step where the user is waiting, and since Groq's free-tier limits are tracked per model, the two tasks also draw from separate quotas instead of competing for one.
+
+## Why sqlglot and a read-only role
+
+A keyword blocklist ("reject anything containing DROP") is easy to get around with comments or odd formatting, and it can't tell that a query touches a table it shouldn't. Parsing the SQL into an actual syntax tree lets me check what the query structurally is: which statement type, which tables.
+
+But I didn't want the whole safety story to depend on my validator having no bugs. So the database connection itself uses a Postgres role that only has SELECT privileges. If the validator ever let something bad through, the database would still refuse to execute it. Two independent layers, so a mistake in one doesn't cause damage.
+
+## Stopping bad SQL
+
+The generation step only ever sees the retrieved schema and is told to use exact table and column names from it. On top of that, the validator rejects any table that isn't on the allow-list, so an invented table name never reaches the database. And if a query still fails at execution (a wrong column name, say), the exact error message is fed back to the LLM for one corrected attempt. It only retries once, so a bad question can't loop forever or burn through the free-tier quota.
+
+## Living on free tiers
+
+The whole project runs at zero cost, which shaped a few decisions:
+
+- **Caching:** repeated questions never hit the LLM at all, which matters when you're demoing the same queries over and over against a rate-limited API.
+- **Local embeddings:** retrieval doesn't consume any API quota.
+- **Model deprecation:** partway through the build, Groq retired the two models I was using and every call started failing with a 400 error. Swapping the model names fixed it, but the real lesson was that hardcoding a model string is a dependency risk. Checking the provider's live model list at startup, and falling back to another model if one disappears, is the change I'd make next.
+
+## Evaluation
+
+I put together a test set of [N] questions against the sample dataset, each with a reference SQL query I wrote by hand, and ran three kinds of checks:
+
+- Execution accuracy (does the generated query return the same result as the reference query): XX%
+- Exact SQL match (generated SQL parses to the same structure as the reference): XX%
+- Safety tests (destructive requests like "delete all customers" get blocked before execution): N/N blocked
+
+The two accuracy numbers will disagree, and I kept both on purpose. Two different SQL queries can return exactly the same answer (different join order, different aliases, a subquery instead of a join), so exact match undercounts real correctness. Execution accuracy is the fairer read on whether the answer is right, and exact match is the stricter one.
+
+## What doesn't work perfectly (and I know about it)
+
+- **The validator checks structure, not meaning.** A perfectly valid SELECT on an allowed table can still answer the wrong question. Validation guarantees a query is safe, not that it's correct. It also checks tables, not individual columns.
+- **No handling for ambiguous questions.** If a question is vague, the model just picks an interpretation and runs with it. Detecting low-confidence retrieval and asking the user to rephrase would be the fix.
+- **Insights are based on a preview.** The summary step only sees the first five rows and the column names of the result, so on a large result set it can describe the top of the table more confidently than the data justifies. Passing aggregates (min, max, averages) alongside the preview would help.
+- **Memory is shallow.** Follow-up questions only carry the last few user questions, not the earlier SQL or results, so complicated multi-step follow-ups can lose context.
+- **The cache is exact-match.** "top 5 products by price" and "5 most expensive products" are two separate cache entries. Matching on semantic similarity would raise the hit rate.
+- **Free-tier ceiling.** Rate limits are fine for one person or a live demo, but not for many concurrent users. SQLite is also a single-writer database, so a real deployment would move the cache to Postgres.
+- **No access control.** There's one global table allow-list, no per-user or per-role permissions.
+- **No few-shot examples yet.** Storing verified question-and-SQL pairs and retrieving similar ones alongside the schema would likely improve accuracy on the trickier queries.
+
+## Project layout
 
 ```
 genai-data-assistant/
-├── app.py                      # Streamlit entrypoint
+├── app.py                      # Streamlit frontend
 ├── modules/
-│   ├── retriever.py            # RAG retrieval from ChromaDB
-│   ├── prompt_builder.py       # Builds the LLM prompt
-│   ├── sql_generator.py        # NL -> SQL via Groq
-│   ├── validator.py            # sqlglot-based safety checks
-│   ├── executor.py             # Runs SQL on Supabase (read-only)
-│   ├── insight_generator.py    # Plain-English summary via Groq
-│   ├── visualizer.py           # Rule-based chart selection
-│   ├── cache.py                # SQLite caching layer
-│   └── logger.py               # Query logging to Supabase
+│   ├── retriever.py            # embeds the question, searches ChromaDB
+│   ├── prompt_builder.py       # assembles the LLM prompt
+│   ├── sql_generator.py        # stage 3: question -> SQL via Groq
+│   ├── validator.py            # stage 4: sqlglot safety checks
+│   ├── executor.py             # runs SQL on Supabase (read-only role)
+│   ├── insight_generator.py    # stage 5: plain-English summary via Groq
+│   ├── visualizer.py           # rule-based chart selection
+│   ├── cache.py                # SQLite cache
+│   └── logger.py               # writes query logs to Supabase
 ├── config/
-│   └── allowed_tables.yaml     # Table allow-list for the validator
+│   └── allowed_tables.yaml     # tables the assistant may query
 ├── scripts/
-│   └── index_schema.py         # One-time script: embed schema into ChromaDB
+│   └── index_schema.py         # embeds schema descriptions into ChromaDB
 ├── tests/
-│   ├── test_validator.py
-│   ├── test_pipeline.py
-│   └── eval_set.json           # Question -> expected SQL pairs
-├── .github/workflows/ci.yml
-├── .env.example
-├── requirements.txt
-└── README.md
+│   ├── test_validator.py       # no API key needed
+│   ├── test_pipeline.py        # exercises the full pipeline
+│   ├── test_eval.py            # accuracy evaluation
+│   └── eval_set.json           # questions + reference SQL
+└── requirements.txt
 ```
 
----
-
-## 🚀 Getting Started
-
-### Prerequisites
-
-- Python 3.10+
-- A free [Supabase](https://supabase.com) account
-- A free [Groq](https://console.groq.com) API key
-
-### 1. Clone and install
+## Running it
 
 ```bash
-git clone https://github.com/<your-username>/genai-data-assistant.git
-cd genai-data-assistant
-
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+cp .env.example .env   # add GROQ_API_KEY and your Supabase connection strings
 ```
 
-### 2. Set up the database (Supabase)
-
-1. Create a new Supabase project.
-2. Load your dataset into the SQL Editor (e.g., a products/orders dataset).
-3. Create the logging table:
-
-```sql
-CREATE TABLE query_logs (
-    id BIGSERIAL PRIMARY KEY,
-    timestamp TIMESTAMPTZ DEFAULT NOW(),
-    user_question TEXT NOT NULL,
-    generated_sql TEXT,
-    execution_status TEXT,
-    latency_ms INTEGER,
-    tokens_used INTEGER,
-    model_used TEXT,
-    cache_hit BOOLEAN DEFAULT FALSE,
-    retrieved_tables TEXT
-);
-```
-
-4. Create a **read-only** role for query execution:
+Set up the database once in the Supabase SQL editor: load your dataset, create the `query_logs` table, and create the read-only role.
 
 ```sql
 CREATE ROLE readonly WITH LOGIN PASSWORD 'your_readonly_password';
 GRANT CONNECT ON DATABASE postgres TO readonly;
 GRANT USAGE ON SCHEMA public TO readonly;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO readonly;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO readonly;
 ```
 
-### 3. Configure environment variables
-
-Copy `.env.example` to `.env` and fill in your values:
-
-```env
-# Groq
-GROQ_API_KEY=your_groq_api_key
-
-# Supabase
-SUPABASE_URL=https://your-project-ref.supabase.co
-SUPABASE_SERVICE_KEY=your_service_role_key
-READONLY_DB_URL=postgresql://readonly:password@db.your-project-ref.supabase.co:5432/postgres
-
-# Local paths
-VECTOR_STORE_PATH=./vector_store
-CACHE_DB_PATH=./cache.db
-ALLOWED_TABLES_PATH=./config/allowed_tables.yaml
-```
-
-> ⚠️ Never commit `.env`. It is listed in `.gitignore`.
-
-### 4. Define the table allow-list
-
-Edit `config/allowed_tables.yaml` with the tables the assistant may query:
-
-```yaml
-tables:
-  - products
-  - orders
-  - customers
-```
-
-### 5. Index your schema into ChromaDB (run once)
+Then list the tables the assistant is allowed to query in `config/allowed_tables.yaml`, and:
 
 ```bash
+# embed the schema into ChromaDB (re-run whenever the schema changes)
 python scripts/index_schema.py
-```
 
-Re-run this whenever your schema changes.
+# tests and evaluation
+python tests/test_validator.py
+python tests/test_pipeline.py
+python tests/test_eval.py
 
-### 6. Run the app
-
-```bash
+# run the app
 streamlit run app.py
 ```
 
-Open the URL shown in your terminal (usually `http://localhost:8501`).
-
----
-
-## 💬 Usage
-
-Type a question and press **Ask**:
-
-- *"Show me the top 10 most expensive products"*
-- *"What is the average price by brand?"*
-- *"Now filter that to products rated above 4"* (follow-up using conversation memory)
-
-For each question you get: the **generated SQL** (expandable), a **results table**, an **auto-selected chart**, and a **plain-English insight**.
-
-You can also test individual modules on their own:
-
-```bash
-python modules/sql_generator.py
-python modules/insight_generator.py
-```
-
----
-
-## 🧪 Testing & Evaluation
-
-```bash
-# Unit + safety tests
-pytest tests/
-
-# Accuracy evaluation against a fixed question -> SQL set
-python tests/test_eval.py
-```
-
-| Test type | What it verifies |
-|---|---|
-| Unit tests | Validator logic, cache hit/miss behavior |
-| Safety tests | Destructive requests ("delete all customers") are always blocked |
-| Evaluation set | Generated SQL compared against expected SQL (AST comparison) |
-
-**Latest evaluation result:** `XX% (N/N questions)` ← _fill in after running the eval script_
-
----
-
-## 🔒 Security Design
-
-Two independent layers protect the database:
-
-1. **Application layer:** `sqlglot` parses generated SQL into an AST. Only `SELECT` statements are allowed, and every referenced table must be in the allow-list.
-2. **Database layer:** query execution uses a PostgreSQL role with `SELECT`-only privileges, so even a validator gap cannot modify data.
-
-Additional practices:
-
-- API keys and credentials live in environment variables / Streamlit secrets, never in source control.
-- Only schema metadata and small result previews are sent to the LLM provider, never full tables.
-
----
-
-## ☁️ Deployment
-
-1. Push the repo to GitHub.
-2. On [Streamlit Community Cloud](https://streamlit.io/cloud), create a new app from the repo and set `app.py` as the entrypoint.
-3. Add these values in the app's **Secrets** settings: `GROQ_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `READONLY_DB_URL`.
-4. GitHub Actions (`.github/workflows/ci.yml`) runs the test suite on every push.
-
----
-
-## ⚠️ Free-Tier Notes & Troubleshooting
-
-**Rate limits.** Groq's free tier is limited per model (requests/minute, tokens/minute, and daily caps). Check your live limits at `console.groq.com/settings/limits`. Caching is what keeps repeated demo questions from consuming quota. Daily limits reset at midnight UTC.
-
-**`400 model_decommissioned` / `404 model not found`.** Groq periodically retires models. If you see this error:
-
-1. Check the current model list and deprecations at `console.groq.com/docs/models` and `console.groq.com/docs/deprecations`.
-2. Update the model strings in `modules/sql_generator.py` and `modules/insight_generator.py`.
-
-**`GROQ_API_KEY not found`.** Make sure `.env` exists in the project root and `load_dotenv()` runs before the client is created.
-
-**Creating files with `cat << 'EOF'`.** Run those heredoc commands directly in your terminal, not inside an editor or Python shell, or the `cat` line ends up inside the file.
-
----
-
-## 🚧 Known Limitations
-
-- Free-tier rate limits make this suitable for personal use and demos, not many concurrent users.
-- SQLite cache is single-writer, so a hosted database would be needed for concurrency.
-- Cache matches on normalized question text, not semantic similarity.
-- No role-based access control; a single global table allow-list applies.
-- Conversation memory is session-only and English-only.
-
----
-
-## 🗺️ Roadmap
-
-- [ ] Role-based access control (per-role table/column permissions)
-- [ ] Semantic caching (match similar questions, not just identical ones)
-- [ ] Hybrid retrieval (vector + keyword) with reranking
-- [ ] Dynamic model discovery and automatic fallback chain
-- [ ] FastAPI backend to decouple the pipeline from the UI
-- [ ] Feedback loop: user-verified SQL added back into few-shot examples
-- [ ] Docker support
-- [ ] CSV / Excel export of results
-
----
-
-## 👤 Author
-
-**`<Your Name>`**
-🔗 [LinkedIn](<your-linkedin-url>) · 💻 [GitHub](<your-github-url>) · 📧 `<your-email>`
-
----
-
-⭐ If you found this project useful, consider giving it a star.
+You can also run a single stage by itself to debug it, for example `python modules/sql_generator.py`.
