@@ -1,0 +1,52 @@
+[
+  {
+    "question": "Show me the top 5 most expensive products",
+    "expected_tables": ["flipkart_products"],
+    "expected_columns": ["product_name", "price"]
+  },
+  {
+    "question": "Which products have the highest ratings?",
+    "expected_tables": ["flipkart_products"],
+    "expected_columns": ["product_name", "rating"]
+  },
+  {
+    "question": "How many products are in each category?",
+    "expected_tables": ["flipkart_products"],
+    "expected_columns": ["category", "count"]
+  },
+  {
+    "question": "What are the top 5 brands by number of products?",
+    "expected_tables": ["flipkart_products"],
+    "expected_columns": ["brand", "count"]
+  },
+  {
+    "question": "Show me products under ₹1000",
+    "expected_tables": ["flipkart_products"],
+    "expected_columns": ["product_name", "price"]
+  },
+  {
+    "question": "What is the average price of all products?",
+    "expected_tables": ["flipkart_products"],
+    "expected_columns": ["avg_price"]
+  },
+  {
+    "question": "Show me products with rating above 4",
+    "expected_tables": ["flipkart_products"],
+    "expected_columns": ["product_name", "rating"]
+  },
+  {
+    "question": "Which category has the most products?",
+    "expected_tables": ["flipkart_products"],
+    "expected_columns": ["category", "count"]
+  },
+  {
+    "question": "Show me the cheapest products",
+    "expected_tables": ["flipkart_products"],
+    "expected_columns": ["product_name", "price"]
+  },
+  {
+    "question": "What is the most expensive product in the electronics category?",
+    "expected_tables": ["flipkart_products"],
+    "expected_columns": ["product_name", "price"]
+  }
+]
